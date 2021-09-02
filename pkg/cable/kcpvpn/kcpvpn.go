@@ -1,4 +1,4 @@
-package kcptun
+package kcpvpn
 
 import (
 	"fmt"
@@ -15,7 +15,7 @@ import (
 )
 
 const (
-	cableDriverName = "kcptun"
+	cableDriverName = "kcpvpn"
 	socatIFace      = "socat-tunnel"
 
 	specEnvPrefix = "ce_ipsec"
@@ -24,9 +24,11 @@ const (
 type specification struct {
 	PSK      string `default:"default psk"`
 	NATTPort int    `default:"4500"`
+	LogFile  string
+	Debug    bool
 }
 
-type kcp_tunnel struct {
+type kcpvpn_driver struct {
 	localEndpoint types.SubmarinerEndpoint
 	connections   map[string]*v1.Connection // clusterID -> remote ep connection
 	mutex         sync.Mutex
@@ -41,7 +43,7 @@ func init() {
 func NewKCPTun(localEndpoint types.SubmarinerEndpoint, localCluster types.SubmarinerCluster) (cable.Driver, error) {
 	var err error
 
-	v := kcp_tunnel{
+	v := kcpvpn_driver{
 		localEndpoint: localEndpoint,
 		connections:   make(map[string]*v1.Connection),
 		spec:          new(specification),
@@ -60,7 +62,7 @@ func NewKCPTun(localEndpoint types.SubmarinerEndpoint, localCluster types.Submar
 	return &v, nil
 }
 
-func (v *kcp_tunnel) Init() error {
+func (v *kcpvpn_driver) Init() error {
 	v.mutex.Lock()
 	defer v.mutex.Unlock()
 
@@ -73,7 +75,7 @@ func (v *kcp_tunnel) Init() error {
 
 // ConnectToEndpoint establishes a connection to the given endpoint and returns a string
 // representation of the IP address of the target endpoint.
-func (v *kcp_tunnel) ConnectToEndpoint(endpointInfo *natdiscovery.NATEndpointInfo) (string, error) {
+func (v *kcpvpn_driver) ConnectToEndpoint(endpointInfo *natdiscovery.NATEndpointInfo) (string, error) {
 	remoteEndpoint := &endpointInfo.Endpoint
 	ip := endpointInfo.UseIP
 
@@ -121,7 +123,7 @@ func (v *kcp_tunnel) ConnectToEndpoint(endpointInfo *natdiscovery.NATEndpointInf
 }
 
 // DisconnectFromEndpoint disconnects from the connection to the given endpoint.
-func (v *kcp_tunnel) DisconnectFromEndpoint(remoteEndpoint types.SubmarinerEndpoint) error {
+func (v *kcpvpn_driver) DisconnectFromEndpoint(remoteEndpoint types.SubmarinerEndpoint) error {
 	klog.V(log.DEBUG).Infof("Removing endpoint %v+", remoteEndpoint)
 
 	if v.localEndpoint.Spec.ClusterID == remoteEndpoint.Spec.ClusterID {
@@ -141,7 +143,7 @@ func (v *kcp_tunnel) DisconnectFromEndpoint(remoteEndpoint types.SubmarinerEndpo
 }
 
 // GetConnections() returns an array of the existing connections, including status and endpoint info
-func (v *kcp_tunnel) GetConnections() ([]v1.Connection, error) {
+func (v *kcpvpn_driver) GetConnections() ([]v1.Connection, error) {
 	connections := make([]v1.Connection, 0)
 
 	v.mutex.Lock()
@@ -155,12 +157,12 @@ func (v *kcp_tunnel) GetConnections() ([]v1.Connection, error) {
 }
 
 // GetActiveConnections returns an array of all the active connections
-func (v *kcp_tunnel) GetActiveConnections() ([]v1.Connection, error) {
+func (v *kcpvpn_driver) GetActiveConnections() ([]v1.Connection, error) {
 	// force caller to skip duplicate handling
 	return make([]v1.Connection, 0), nil
 }
 
-func (v *kcp_tunnel) GetName() string {
+func (v *kcpvpn_driver) GetName() string {
 	return cableDriverName
 }
 
