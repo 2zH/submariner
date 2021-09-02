@@ -11,4 +11,11 @@ RUN dnf -y install --nodocs --setopt=install_weak_deps=0 \
 
 COPY package/submariner.sh package/pluto bin/${TARGETPLATFORM}/submariner-gateway /usr/local/bin/
 
+RUN dnf -y install --nodocs --setopt=install_weak_deps=0 \
+           socat && \
+    dnf -y clean all
+
+COPY kcptun-linux-amd64-20210624/client_linux_amd64 /usr/local/bin/kcp_client
+COPY kcptun-linux-amd64-20210624/server_linux_amd64 /usr/local/bin/kcp_server
+
 ENTRYPOINT submariner.sh
