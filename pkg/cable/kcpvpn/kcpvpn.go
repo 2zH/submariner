@@ -3,7 +3,11 @@ package kcpvpn
 import (
 	"fmt"
 	"net"
+	"os"
+	"os/exec"
+	"strconv"
 	"sync"
+	"syscall"
 
 	"github.com/kelseyhightower/envconfig"
 	"github.com/submariner-io/admiral/pkg/log"
@@ -49,7 +53,7 @@ func NewKCPTun(localEndpoint types.SubmarinerEndpoint, localCluster types.Submar
 		spec:          new(specification),
 	}
 
-	err = envconfig.Process(specEnvPrefix, &v.spec)
+	err = envconfig.Process(specEnvPrefix, v.spec)
 	if err != nil {
 		return nil, fmt.Errorf("error processing environment config for %s: %v", specEnvPrefix, err)
 	}
@@ -68,6 +72,10 @@ func (v *kcpvpn_driver) Init() error {
 
 	if len(v.connections) != 0 {
 		return fmt.Errorf("cannot initialize with existing connections: %+v", v.connections)
+	}
+
+	if err := v.runServer(v.spec.NATTPort); err != nil {
+		return fmt.Errorf("error starting kcpvpn server: %v", err)
 	}
 
 	return nil
@@ -99,9 +107,10 @@ func (v *kcpvpn_driver) ConnectToEndpoint(endpointInfo *natdiscovery.NATEndpoint
 	}
 
 	remotePort := int(port)
+	connectionMode := v.calculateOperationMode(&remoteEndpoint.Spec)
 
-	klog.V(log.DEBUG).Infof("Connecting cluster %s endpoint %s:%d, AllowedIPs:%v",
-		remoteEndpoint.Spec.ClusterID, remoteIP, remotePort, allowedIPs)
+	klog.Infof("Connecting cluster %s endpoint %s:%d in %s mode, AllowedIPs:%v ",
+		remoteEndpoint.Spec.ClusterID, remoteIP, remotePort, connectionMode, allowedIPs)
 	v.mutex.Lock()
 	defer v.mutex.Unlock()
 
@@ -109,6 +118,10 @@ func (v *kcpvpn_driver) ConnectToEndpoint(endpointInfo *natdiscovery.NATEndpoint
 	_, found := v.connections[remoteEndpoint.Spec.ClusterID]
 	if found {
 		delete(v.connections, remoteEndpoint.Spec.ClusterID)
+	}
+
+	if connectionMode == operationModeClient {
+		v.runClientConnectTo(v.localEndpoint.Spec.ClusterID, v.spec.PSK, remoteIP, remotePort)
 	}
 
 	// create connection, overwrite existing connection
@@ -182,4 +195,100 @@ func parseSubnets(subnets []string) []net.IPNet {
 	}
 
 	return nets
+}
+
+func (v *kcpvpn_driver) runServer(listenPort int) error {
+	klog.Info("Starting kcpvpn server")
+
+	args := []string{
+		"server",
+		"--ip", "0.0.0.0",
+		"--port", strconv.Itoa(listenPort),
+		"--kcp-mode", "fast3",
+		"--vni-mode", "tun",
+		"--local-ip", "10.188.0.0",
+		"--assignable-ips", "10.188.0.0/16",
+		"--secret", v.spec.PSK,
+	}
+
+	cmd := exec.Command("/usr/local/bin/kcpvpn", args...)
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+
+	var outputFile *os.File
+
+	if v.spec.LogFile != "" {
+		out, err := os.OpenFile(v.spec.LogFile, os.O_RDWR|os.O_CREATE|os.O_APPEND, 0666)
+		if err != nil {
+			return fmt.Errorf("failed to open log file %s: %v", v.spec.LogFile, err)
+		}
+
+		cmd.Stdout = out
+		cmd.Stderr = out
+		outputFile = out
+	}
+
+	cmd.SysProcAttr = &syscall.SysProcAttr{
+		Pdeathsig: syscall.SIGTERM,
+	}
+
+	if err := cmd.Start(); err != nil {
+		// Note - Close handles nil receiver
+		outputFile.Close()
+		return fmt.Errorf("error starting the kcpvpn process with args %v: %v", args, err)
+	}
+
+	go func() {
+		defer outputFile.Close()
+		klog.Fatalf("kcpvpn server exited: %v", cmd.Wait())
+	}()
+
+	return nil
+}
+
+func (v *kcpvpn_driver) runClientConnectTo(localClusterID string, psk string, remoteIP net.IP, remotePort int) error {
+	klog.Info("Starting kcpvpn client")
+
+	args := []string{
+		"client",
+		"--client-id", localClusterID,
+		"--ip", remoteIP.String(),
+		"--port", strconv.Itoa(remotePort),
+		"--kcp-mode", "fast3",
+		"--secret", psk,
+	}
+
+	cmd := exec.Command("/usr/local/bin/kcpvpn", args...)
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+
+	var outputFile *os.File
+
+	if v.spec.LogFile != "" {
+		out, err := os.OpenFile(v.spec.LogFile, os.O_RDWR|os.O_CREATE|os.O_APPEND, 0666)
+		if err != nil {
+			return fmt.Errorf("failed to open log file %s: %v", v.spec.LogFile, err)
+		}
+
+		cmd.Stdout = out
+		cmd.Stderr = out
+		outputFile = out
+	}
+
+	cmd.SysProcAttr = &syscall.SysProcAttr{
+		Pdeathsig: syscall.SIGTERM,
+	}
+
+	if err := cmd.Start(); err != nil {
+		// Note - Close handles nil receiver
+		outputFile.Close()
+		return fmt.Errorf("error starting the kcpvpn process with args %v: %v", args, err)
+	}
+
+	go func() {
+		defer outputFile.Close()
+		klog.Fatalf("kcpvpn client exited: %v", cmd.Wait())
+	}()
+
+	return nil
 }
