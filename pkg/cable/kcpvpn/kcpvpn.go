@@ -1,6 +1,7 @@
 package kcpvpn
 
 import (
+	"context"
 	"fmt"
 	"net"
 	"os"
@@ -8,6 +9,7 @@ import (
 	"strconv"
 	"sync"
 	"syscall"
+	"time"
 
 	"github.com/kelseyhightower/envconfig"
 	"github.com/submariner-io/admiral/pkg/log"
@@ -15,7 +17,12 @@ import (
 	"github.com/submariner-io/submariner/pkg/cable"
 	"github.com/submariner-io/submariner/pkg/natdiscovery"
 	"github.com/submariner-io/submariner/pkg/types"
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 	"k8s.io/klog"
+
+	pb "github.com/submariner-io/submariner/pkg/cable/kcpvpn/controller"
 )
 
 const (
@@ -38,6 +45,9 @@ type kcpvpn_driver struct {
 	mutex         sync.Mutex
 
 	spec *specification
+
+	controlConn   *grpc.ClientConn
+	controlClient pb.KCPVPNCtlClient
 }
 
 func init() {
@@ -78,6 +88,26 @@ func (v *kcpvpn_driver) Init() error {
 		return fmt.Errorf("error starting kcpvpn server: %v", err)
 	}
 
+	// Wait up to 5s for the control socket
+	var opts []grpc.DialOption
+	opts = append(opts, grpc.WithInsecure())
+	for i := 0; i < 5; i++ {
+		conn, err := grpc.Dial("localhost:2000", opts...)
+		if err == nil {
+			v.controlConn = conn
+			v.controlClient = pb.NewKCPVPNCtlClient(conn)
+			break
+		}
+
+		time.Sleep(1 * time.Second)
+	}
+
+	if v.controlClient == nil {
+		return fmt.Errorf("failed to connect to controller")
+	}
+
+	klog.Info("kcpvpn control service connected")
+
 	return nil
 }
 
@@ -109,19 +139,35 @@ func (v *kcpvpn_driver) ConnectToEndpoint(endpointInfo *natdiscovery.NATEndpoint
 	remotePort := int(port)
 	connectionMode := v.calculateOperationMode(&remoteEndpoint.Spec)
 
-	klog.Infof("Connecting cluster %s endpoint %s:%d in %s mode, AllowedIPs:%v ",
+	klog.Infof("Connecting to cluster %s endpoint %s:%d in %s mode, AllowedIPs:%v ",
 		remoteEndpoint.Spec.ClusterID, remoteIP, remotePort, connectionMode, allowedIPs)
 	v.mutex.Lock()
 	defer v.mutex.Unlock()
 
-	// delete or update old peers for ClusterID
-	_, found := v.connections[remoteEndpoint.Spec.ClusterID]
-	if found {
-		delete(v.connections, remoteEndpoint.Spec.ClusterID)
-	}
-
 	if connectionMode == operationModeClient {
-		v.runClientConnectTo(v.localEndpoint.Spec.ClusterID, v.spec.PSK, remoteIP, remotePort)
+		_, err := v.controlClient.ConnectToCluster(context.Background(), &pb.ConnectToClusterRequest{
+			ClusterId: v.localEndpoint.Spec.ClusterID,
+			Subnets:   convertToPBSubnets(allowedIPs),
+			IpAddress: remoteIP.String(),
+			Port:      int32(remotePort),
+		})
+		if err != nil {
+			s := status.Convert(err)
+			if s.Code() == codes.AlreadyExists {
+				return ip, nil
+			}
+			klog.Warningf("failed to call ConnectToCluster: %v", err)
+			return "", err
+		}
+	} else if connectionMode == operationModeServer {
+		_, err := v.controlClient.AllowConnectionFromCluster(context.Background(), &pb.AllowConnectionFromClusterRequest{
+			ClusterId: remoteEndpoint.Spec.ClusterID,
+			Subnets:   convertToPBSubnets(allowedIPs),
+		})
+		if err != nil {
+			klog.Warningf("failed to call AllowConnectionFromCluster: %v", err)
+			return "", err
+		}
 	}
 
 	// create connection, overwrite existing connection
@@ -157,6 +203,15 @@ func (v *kcpvpn_driver) DisconnectFromEndpoint(remoteEndpoint types.SubmarinerEn
 
 // GetConnections() returns an array of the existing connections, including status and endpoint info
 func (v *kcpvpn_driver) GetConnections() ([]v1.Connection, error) {
+	resp, err := v.controlClient.GetConnections(context.Background(), &pb.GetConnectionsRequest{})
+	if err != nil {
+		return nil, err
+	}
+
+	for _, c := range resp.Connections {
+		klog.Infof("Conn: %s (%v)", c.ClusterId, c.Status)
+	}
+
 	connections := make([]v1.Connection, 0)
 
 	v.mutex.Lock()
@@ -192,6 +247,20 @@ func parseSubnets(subnets []string) []net.IPNet {
 		}
 
 		nets = append(nets, *cidr)
+	}
+
+	return nets
+}
+
+func convertToPBSubnets(subnets []net.IPNet) []*pb.Subnet {
+	nets := make([]*pb.Subnet, 0, len(subnets))
+
+	for _, sn := range subnets {
+		ones, _ := sn.Mask.Size()
+		nets = append(nets, &pb.Subnet{
+			Ip:   sn.IP.String(),
+			Mask: uint32(ones),
+		})
 	}
 
 	return nets

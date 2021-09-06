@@ -1,0 +1,63 @@
+syntax = "proto3";
+
+option go_package = "github.com/yzslab/kcpvpn/controller";
+
+package kcpvpn_ctl;
+
+service KCPVPNCtl {
+  rpc GetConnections (GetConnectionsRequest) returns (GetConnectionsReply);
+  rpc ConnectToCluster (ConnectToClusterRequest) returns (ConnectToClusterReply);
+  rpc AllowConnectionFromCluster (AllowConnectionFromClusterRequest) returns (AllowConnectionFromClusterReply);
+  rpc DisconnectFromCluster (DisconnectFromClusterRequest) returns (DisconnectFromClusterReply);
+}
+
+message GetConnectionsRequest {
+}
+
+message GetConnectionsReply {
+  repeated ConnectionInfo connections = 1;
+}
+
+enum ConnectionStatus {
+  Unknown = 0;
+  Connecting = 1;
+  Connected = 2;
+  Disconnected = 3;
+}
+
+message ConnectionInfo {
+  ConnectionStatus status = 1;
+  string cluster_id = 2;
+  int64 recv_bytes = 3;
+  int64 sent_bytes = 4;
+}
+
+message ConnectToClusterRequest {
+  string cluster_id = 1;
+  string ip_address = 2;
+  int32 port = 3;
+  repeated Subnet subnets = 4;
+}
+
+message ConnectToClusterReply {
+}
+
+message Subnet {
+  string ip = 1;
+  uint32 mask = 2;
+}
+
+message AllowConnectionFromClusterRequest {
+  string cluster_id = 1;
+  repeated Subnet subnets = 2;
+}
+
+message AllowConnectionFromClusterReply {
+}
+
+message DisconnectFromClusterRequest {
+  string cluster_id = 1;
+}
+
+message DisconnectFromClusterReply {
+}
