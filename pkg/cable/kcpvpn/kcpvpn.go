@@ -208,8 +208,8 @@ func (v *kcpvpn_driver) GetConnections() ([]v1.Connection, error) {
 		return nil, err
 	}
 
-	for _, c := range resp.Connections {
-		klog.Infof("Conn: %s (%v)", c.ClusterId, c.Status)
+	for i, c := range resp.Connections {
+		klog.Infof("Conn[%d]: %s (%v)", i, c.ClusterId, c.Status)
 	}
 
 	connections := make([]v1.Connection, 0)
