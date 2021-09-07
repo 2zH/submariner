@@ -183,16 +183,20 @@ func (v *kcpvpn_driver) ConnectToEndpoint(endpointInfo *natdiscovery.NATEndpoint
 
 // DisconnectFromEndpoint disconnects from the connection to the given endpoint.
 func (v *kcpvpn_driver) DisconnectFromEndpoint(remoteEndpoint types.SubmarinerEndpoint) error {
-	klog.V(log.DEBUG).Infof("Removing endpoint %v+", remoteEndpoint)
-
 	if v.localEndpoint.Spec.ClusterID == remoteEndpoint.Spec.ClusterID {
 		klog.V(log.DEBUG).Infof("Will not disconnect self")
 		return nil
 	}
 
+	klog.Infof("Removing connection to %v+", remoteEndpoint)
+
 	v.mutex.Lock()
 	defer v.mutex.Unlock()
 
+	_, err := v.controlClient.DisconnectFromCluster(context.Background(), &pb.DisconnectFromClusterRequest{ClusterId: remoteEndpoint.Spec.ClusterID})
+	if err != nil {
+		klog.Warningf("failed to call DisconnectFromCluster: %v", err)
+	}
 	delete(v.connections, remoteEndpoint.Spec.ClusterID)
 
 	klog.V(log.DEBUG).Infof("Done removing endpoint for cluster %s", remoteEndpoint.Spec.ClusterID)
@@ -201,17 +205,55 @@ func (v *kcpvpn_driver) DisconnectFromEndpoint(remoteEndpoint types.SubmarinerEn
 	return nil
 }
 
-// GetConnections() returns an array of the existing connections, including status and endpoint info
-func (v *kcpvpn_driver) GetConnections() ([]v1.Connection, error) {
+func pbStatusToSubStatus(s pb.ConnectionStatus) v1.ConnectionStatus {
+	switch s {
+	case pb.ConnectionStatus_Connected:
+		return v1.Connected
+	case pb.ConnectionStatus_Connecting:
+		return v1.Connecting
+	}
+	return v1.ConnectionError
+}
+
+func (v *kcpvpn_driver) refreshConnectionStatus() error {
 	resp, err := v.controlClient.GetConnections(context.Background(), &pb.GetConnectionsRequest{})
 	if err != nil {
-		return nil, err
+		return err
 	}
+
+	v.mutex.Lock()
+	defer v.mutex.Unlock()
+
+	cable.RecordNoConnections()
 
 	for i, c := range resp.Connections {
-		klog.Infof("Conn[%d]: %s (%v)", i, c.ClusterId, c.Status)
+		klog.Infof("Conn[%d]: %s (%v) rx: %d tx: %d", i, c.ClusterId, c.Status, c.RecvBytes, c.SentBytes)
+		local_conn, found := v.connections[c.ClusterId]
+		if !found {
+			klog.Warningf("connection to %s not found in local state", c.ClusterId)
+			continue
+		}
+		local_conn.Status = pbStatusToSubStatus(c.Status)
+
+		cable.RecordConnection(cableDriverName, &v.localEndpoint.Spec, &local_conn.Endpoint, string(local_conn.Status), false)
+		cable.RecordRxBytes(cableDriverName, &v.localEndpoint.Spec, &local_conn.Endpoint, int(c.RecvBytes))
+		cable.RecordTxBytes(cableDriverName, &v.localEndpoint.Spec, &local_conn.Endpoint, int(c.SentBytes))
 	}
 
+	return nil
+}
+
+// GetConnections() returns an array of the existing connections, including status and endpoint info
+func (v *kcpvpn_driver) GetConnections() ([]v1.Connection, error) {
+	if err := v.refreshConnectionStatus(); err != nil {
+		return []v1.Connection{}, err
+	}
+
+	return v.GetActiveConnections()
+}
+
+// GetActiveConnections returns an array of all the active connections
+func (v *kcpvpn_driver) GetActiveConnections() ([]v1.Connection, error) {
 	connections := make([]v1.Connection, 0)
 
 	v.mutex.Lock()
@@ -222,12 +264,6 @@ func (v *kcpvpn_driver) GetConnections() ([]v1.Connection, error) {
 	}
 
 	return connections, nil
-}
-
-// GetActiveConnections returns an array of all the active connections
-func (v *kcpvpn_driver) GetActiveConnections() ([]v1.Connection, error) {
-	// force caller to skip duplicate handling
-	return make([]v1.Connection, 0), nil
 }
 
 func (v *kcpvpn_driver) GetName() string {
